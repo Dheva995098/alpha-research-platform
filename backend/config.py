@@ -61,6 +61,14 @@ class Settings(BaseSettings):
             if normalized in {"0", "false", "no", "off", "release", "production", "prod"}:
                 return False
         return value
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value):
+        """Accept hosted Postgres URLs from common providers."""
+        if isinstance(value, str) and value.startswith("postgres://"):
+            return value.replace("postgres://", "postgresql://", 1)
+        return value
     
 
 @lru_cache()

@@ -203,6 +203,8 @@ def init_db():
 
 def _ensure_lightweight_migrations():
     """Apply tiny SQLite-compatible schema additions for local development."""
+    if "sqlite" not in settings.database_url:
+        return
     with engine.begin() as connection:
         inspector = inspect(connection)
         table_names = set(inspector.get_table_names())
