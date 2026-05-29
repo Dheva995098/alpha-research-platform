@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: alpha-research-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - DATABASE_URL=sqlite:///./alpha_research.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./backend:/app/backend
+      - ./alpha_research.db:/app/alpha_research.db
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - alpha-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    image: node:18-alpine
+    container_name: alpha-research-frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    working_dir: /app
+    command: npm start
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    networks:
+      - alpha-network
+    depends_on:
+      - backend
+
+networks:
+  alpha-network:
+    driver: bridge

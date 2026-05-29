@@ -1,0 +1,22 @@
+{
+  "plan": [
+    {
+      "text": "Implement `ModelAdapter` abstraction and register adapters (backend/generation/model_adapter.py)"
+    },
+    {
+      "text": "Implement `AgentController` to analyze repo and produce prioritized steps (backend/generation/agent_controller.py)"
+    },
+    {
+      "text": "Add CLI `scripts/codex_agent.py` to run the agent locally and write a plan file"
+    },
+    {
+      "text": "Add prompt templates at backend/generation/prompts/agent_prompt.md"
+    },
+    {
+      "text": "Add unit tests for agent (tests/test_agent.py)"
+    },
+    {
+      "text": "Human review the generated plan before any destructive actions"
+    }
+  ]
+}
