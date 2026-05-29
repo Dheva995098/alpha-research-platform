@@ -67,7 +67,9 @@ class Settings(BaseSettings):
     def normalize_database_url(cls, value):
         """Accept hosted Postgres URLs from common providers."""
         if isinstance(value, str) and value.startswith("postgres://"):
-            return value.replace("postgres://", "postgresql://", 1)
+            return value.replace("postgres://", "postgresql+psycopg://", 1)
+        if isinstance(value, str) and value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+psycopg://", 1)
         return value
     
 
