@@ -1,0 +1,40 @@
+# Render Blueprint: always-on autopilot worker for the Alpha Research Platform.
+#
+# The Vercel deployment hosts the UI + on-demand API (serverless). This worker
+# runs the Special Auto loop 24/7 (generate -> submit -> poll -> learn) against
+# the SAME Postgres as Vercel, so results/memory/library/model persist and show
+# up in the live dashboard.
+#
+# Setup (Render dashboard -> New -> Blueprint -> point at this repo):
+#   1. Set DATABASE_URL to the SAME Postgres connection string used by Vercel.
+#   2. Set AES_KEY to the SAME value as the Vercel project (needed to decrypt the
+#      stored BRAIN account password).
+#   3. Make sure your BRAIN account exists in that Postgres (add it once via the
+#      live Vercel dashboard -> Accounts), is active + worker-enabled, id = 1.
+#
+# Note: an always-on Background Worker requires a paid Render plan (no free
+# always-on workers). Railway/Fly/a small VPS work equally well (see DEPLOY.md).
+services:
+  - type: worker
+    name: alpha-autopilot-worker
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/run_worker.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false            # paste the same Postgres URL as Vercel
+      - key: AES_KEY
+        sync: false            # MUST match the Vercel AES_KEY
+      - key: SINGLE_ACCOUNT_MODE
+        value: "true"
+      - key: PRIMARY_ACCOUNT_ID
+        value: "1"
+      - key: WORKER_DRY_RUN
+        value: "false"
+      - key: WORKER_AUTO_LEARN
+        value: "true"
+      - key: WORKER_ACCOUNT_ID
+        value: "1"
+      - key: LOG_LEVEL
+        value: "INFO"
