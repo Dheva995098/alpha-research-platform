@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.ml.features import FEATURE_NAMES
 from backend.ml.ranker import AlphaRanker, PredictionResult, TrainingExample, TrainingResult
-from backend.models import LeaderboardAlpha, MLModelRecord, Result
+from backend.models import AlphaLibrary, AttemptMemory, LeaderboardAlpha, MLModelRecord, Result
 
 
 class MLRankingService:
@@ -135,7 +135,63 @@ class MLRankingService:
                 )
             )
 
+        examples.extend(self._self_improving_examples())
         return examples
+
+    def _self_improving_examples(self) -> List[TrainingExample]:
+        """Positives from the confirmed-win library + hard negatives from near-misses.
+
+        Library winners are the system's own ground truth of good alphas; near-misses
+        are the most information-dense negatives (looked good, still failed), so they
+        sharpen the ranker's precision exactly where quota is wasted. Inert until the
+        self-improving loop has accumulated data.
+        """
+        out: List[TrainingExample] = []
+        try:
+            for row in self.db.query(AlphaLibrary).all():
+                if not row.expression:
+                    continue
+                out.append(
+                    TrainingExample(
+                        expression=row.expression,
+                        label=1,
+                        metrics={
+                            "sharpe": row.sharpe,
+                            "fitness": row.fitness,
+                            "turnover": row.turnover,
+                            "self_correlation": row.self_correlation,
+                            "all_checks_passed": True,
+                        },
+                        weight=1.5,
+                    )
+                )
+            near_rows = (
+                self.db.query(AttemptMemory)
+                .filter(AttemptMemory.outcome == "near")
+                .order_by(AttemptMemory.score.desc())
+                .limit(200)
+                .all()
+            )
+            for row in near_rows:
+                if not row.expression:
+                    continue
+                out.append(
+                    TrainingExample(
+                        expression=row.expression,
+                        label=0,  # hard negative: confidently near, still not a pass
+                        metrics={
+                            "sharpe": row.sharpe,
+                            "fitness": row.fitness,
+                            "turnover": row.turnover,
+                            "self_correlation": row.self_correlation,
+                            "all_checks_passed": False,
+                        },
+                        weight=2.0,
+                    )
+                )
+        except Exception:
+            return out
+        return out
 
     def _save_ranker(self, training_result: TrainingResult) -> MLModelRecord:
         self.db.query(MLModelRecord).filter(MLModelRecord.name == self.MODEL_NAME).update({"is_active": False})

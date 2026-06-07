@@ -67,17 +67,20 @@ class BRAINDataFields:
         "anl4_eps_mean", "anl4_ptp_mean",
     }
     
-    # FASTEXPR operators
+    # FASTEXPR operators (aligned with the live BRAIN operator reference)
     TIME_SERIES_OPS = {
         "ts_rank", "ts_corr", "ts_covariance", "ts_mean",
-        "ts_sum", "ts_decay_linear", "ts_decay_exp",
+        "ts_sum", "ts_decay_linear", "ts_decay_exp", "ts_decay_exp_window",
         "ts_min", "ts_max", "ts_zscore", "ts_skewness",
-        "ts_kurtosis", "ts_count", "ts_delta",
+        "ts_kurtosis", "ts_count", "ts_count_nans", "ts_delta",
         "ts_arg_min", "ts_arg_max", "ts_product", "ts_scale",
         "ts_av_diff", "ts_backfill", "ts_regression",
         "ts_delay", "ts_std_dev", "ts_step", "ts_median",
+        "ts_quantile", "ts_moment", "ts_ir", "ts_entropy",
+        "ts_returns", "ts_weighted_delay", "days_from_last_change",
+        "last_diff_value", "hump",
     }
-    
+
     GROUPING_OPS = {
         "group_neutralize",  # group_neutralize(expr, sector|industry|subindustry|market)
         "group_rank",
@@ -86,22 +89,32 @@ class BRAINDataFields:
         "group_std",
         "group_zscore",
         "group_backfill",
+        "group_vector_neut",  # group_vector_neut(x, y, group) -> in-group orthogonalization
+        "group_count",
+        "group_normalize",
+        "group_sum",
+        "group_max",
+        "group_min",
     }
-    
+
     MATH_OPS = {
         "rank", "sigmoid", "scale", "zscore", "sign", "power",
         "abs", "sqrt", "log", "exp", "sin", "cos", "tan",
         "ceil", "floor", "round", "min", "max", "clip",
-        "winsorize", "normalize",
+        "winsorize", "normalize", "quantile", "reverse",
+        "signed_power", "signedpower", "vector_neut",
+        "tail", "densify", "fraction", "log_diff", "purify",
         "bucket", "pasteurize",
     }
-    
+
     LOGIC_OPS = {
         "if_else", "and", "or", "not", "mask", "trade_when", "is_nan"
     }
 
     VECTOR_OPS = {
         "vec_avg", "vec_sum", "vec_count", "vec_max", "vec_min",
+        "vec_stddev", "vec_norm", "vec_range", "vec_ir",
+        "vec_skewness", "vec_kurtosis", "vec_choose",
     }
     
     ALL_OPS = TIME_SERIES_OPS | GROUPING_OPS | MATH_OPS | LOGIC_OPS | VECTOR_OPS

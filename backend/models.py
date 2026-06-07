@@ -187,6 +187,70 @@ class MLModelRecord(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
 
+class AttemptMemory(Base):
+    """Persistent self-improving memory of every attempted alpha and its outcome.
+
+    This is the "tried[] + failures[]" log from the self-improving loop spec: an
+    append/upsert log keyed by (expression_signature, settings_signature) that
+    survives across runs and is read back into generation so the system stops
+    repeating dead-ends and can cheaply repair near-misses.
+    """
+    __tablename__ = "attempt_memory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    expression_signature = Column(String, index=True)
+    settings_signature = Column(String, index=True, nullable=True)
+    expression = Column(Text)
+    settings = Column(JSON, nullable=True)
+    focus = Column(String, index=True, nullable=True)
+    dataset_id = Column(String, index=True, nullable=True)
+    outcome = Column(String, default="fail", index=True)  # win, near, fail, error
+    failures = Column(JSON, nullable=True)  # list[str] of failure tags, e.g. ["HIGH_TURNOVER"]
+    score = Column(Float, default=0.0, index=True)  # continuous composite score
+    sharpe = Column(Float, nullable=True)
+    fitness = Column(Float, nullable=True)
+    turnover = Column(Float, nullable=True)
+    self_correlation = Column(Float, nullable=True)
+    attempts = Column(Integer, default=1)  # how many times this signature was seen
+    source = Column(String, default="autopilot", index=True)
+    repaired_from = Column(String, nullable=True)  # parent signature if produced by the refiner
+    result_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    def __repr__(self):
+        return f"<AttemptMemory(sig={self.expression_signature}, outcome={self.outcome}, score={self.score})>"
+
+
+class AlphaLibrary(Base):
+    """Curated, auto-growing library of confirmed-good alphas (the spec's library[]).
+
+    Pattern B remembers what was tried; this remembers what was *good*. Confirmed
+    wins are promoted here automatically and injected back into generation as
+    proven seed material so new-candidate quality compounds over time.
+    """
+    __tablename__ = "alpha_library"
+
+    id = Column(Integer, primary_key=True, index=True)
+    expression_signature = Column(String, unique=True, index=True)
+    expression = Column(Text)
+    settings = Column(JSON, nullable=True)
+    focus = Column(String, index=True, nullable=True)
+    dataset_id = Column(String, index=True, nullable=True)
+    sharpe = Column(Float, nullable=True)
+    fitness = Column(Float, nullable=True)
+    turnover = Column(Float, nullable=True)
+    self_correlation = Column(Float, nullable=True)
+    score = Column(Float, default=0.0, index=True)
+    source = Column(String, default="win", index=True)  # win, curated, imported
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    def __repr__(self):
+        return f"<AlphaLibrary(sig={self.expression_signature}, score={self.score})>"
+
+
 # Database setup
 engine = create_engine(
     settings.database_url,

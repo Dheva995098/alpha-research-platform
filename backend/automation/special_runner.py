@@ -18,12 +18,18 @@ from backend.core.dataset_catalog import (
 from backend.core.field_intelligence import schema_with_persisted_fields, top_field_names
 from backend.core.simulation_settings import merge_simulation_settings
 from backend.generation.candidates import AlphaCandidate
+from backend.generation.dedup import expression_signature
 from backend.generation.expression_generator import RuleBasedAlphaGenerator, STRATEGY_DESCRIPTIONS
+from backend.generation.genetic import GeneticAlphaRefiner
 from backend.generation.openai_advisor import OpenAIAlphaAdvisor
 from backend.ml.auto_learner import AutoLearningService
 from backend.ml.service import MLRankingService
-from backend.models import Account, Simulation
+from backend.models import Account, AttemptMemory, Result, Simulation
 from backend.orchestration.service import RUNNING_STATUSES, SimulationOrchestrator
+from backend.selfimprove import bandit, feedback, motifs
+from backend.selfimprove.evaluator import Verdict
+from backend.selfimprove.memory import AttemptMemoryService
+from backend.selfimprove.refiner import DeterministicRefiner
 from backend.utils.time import utc_now
 
 logger = logging.getLogger(__name__)
@@ -111,6 +117,9 @@ class SpecialAutopilot:
         else:
             poll_message = "Skipped on submit tick; worker poll interval owns BRAIN polling"
             poll_errors = []
+        # Self-improving loop: fold freshly-completed live results into persistent
+        # memory (tried[]/failures[]) and promote confirmed wins into the library.
+        memory_absorbed = self._absorb_results(db, selected_account_ids)
         stale_count = self.reap_stale_running(
             db,
             max_age_minutes=stale_running_minutes,
@@ -137,14 +146,26 @@ class SpecialAutopilot:
             and running_before < max_running
             and (running_before < target_running or lane_needs_work)
         )
+        repaired_count = 0
         if should_refill_pending and pending_room > 0:
-            batch = self.queue_random_batch(
+            # Pattern E: cheaply repair recent near-misses before paying for fresh
+            # generation. Repairs are high-value (they derive from candidates that
+            # already showed signal) and free of an LLM/regen call.
+            repaired_count = self._queue_repairs(
                 db,
                 orchestrator,
-                batch_size=min(batch_size, pending_room),
-                openai_assist=openai_assist,
                 account_ids=selected_account_ids,
+                pending_room=pending_room,
             )
+            remaining_room = max(0, pending_room - repaired_count)
+            if remaining_room > 0:
+                batch = self.queue_random_batch(
+                    db,
+                    orchestrator,
+                    batch_size=min(batch_size, remaining_room),
+                    openai_assist=openai_assist,
+                    account_ids=selected_account_ids,
+                )
 
         submitted = []
         submit_errors: List[str] = []
@@ -198,6 +219,8 @@ class SpecialAutopilot:
             "refill_skipped": not should_refill_pending,
             "rebalance": rebalance_result.metadata,
             "lanes": self._lane_snapshot(db, selected_account_ids),
+            "memory_absorbed": memory_absorbed,
+            "repaired_count": repaired_count,
             "batch": asdict(batch) if batch else None,
             "submitted_ids": submitted,
             "submit_errors": submit_errors,
@@ -285,6 +308,25 @@ class SpecialAutopilot:
             neutralize=self.random.random() > 0.15,
             existing_expressions=existing,
         )
+        # Ground generation in proven 101-Alphas/BRAIN motifs for this focus (negated
+        # price-volume reversal, ranked-correlation, vector_neut decorrelation, ...),
+        # deduped against the rule-based output so the pool stays unique.
+        try:
+            existing_sigs = {expression_signature(c.expression) for c in candidates}
+            proven = [
+                candidate
+                for candidate in motifs.motif_candidates(focus, schema=schema, limit=max(batch_size, 8))
+                if expression_signature(candidate.expression) not in existing_sigs
+            ]
+            if proven:
+                candidates = proven + candidates
+        except Exception:
+            logger.info("self-improve: motif injection failed", exc_info=True)
+        # Pattern H: mutate confirmed winners from the library into fresh candidates so
+        # new-candidate quality compounds on what already worked. No-op until wins land.
+        seeded = self._library_seed_candidates(db, schema, focus, seed, batch_size, existing, candidates)
+        if seeded:
+            candidates = seeded + candidates
         if len(candidates) >= batch_size:
             return candidates
 
@@ -323,16 +365,21 @@ class SpecialAutopilot:
         openai_assist: bool,
     ) -> tuple[List[Dict[str, Any]], int]:
         ranker = MLRankingService(db)
+        # Patterns C/D: bias ranking away from operator shapes that keep failing in
+        # recent memory, and collect negative examples for the OpenAI advisor.
+        term_weights, failure_examples = self._memory_feedback(db)
         ranked = []
         for candidate in candidates:
             prediction = ranker.score_expression(candidate.expression, metrics={"settings": settings})
             failure_penalty = self._failure_shape_penalty(candidate.expression, focus, settings)
+            memory_penalty = feedback.shape_penalty(candidate.expression, term_weights)
             blended = (
                 prediction.score * 0.55
                 + prediction.pass_probability * 0.30
                 + candidate.score * 0.15
                 + self.random.random() * 0.025
                 - failure_penalty
+                - memory_penalty
             )
             ranked.append(
                 {
@@ -352,6 +399,7 @@ class SpecialAutopilot:
                 focus=focus,
                 dataset_id=dataset_id,
                 limit=30,
+                recent_failures=failure_examples,
             )
         except Exception:
             logger.info("OpenAI special autopilot advice unavailable", exc_info=True)
@@ -370,8 +418,163 @@ class SpecialAutopilot:
             item["score"] = round(item["score"] * 0.80 + advice_item.score * 0.20, 4)
         return sorted(ranked, key=lambda item: item["score"], reverse=True), len(advice_by_expression)
 
+    # ----- self-improving loop hooks --------------------------------------
+    def _absorb_results(self, db: Session, account_ids: Optional[Sequence[int]] = None) -> int:
+        """Record freshly-completed live results into persistent attempt memory.
+
+        Each new (non-dry) result is evaluated into a Verdict and appended to the
+        tried[]/failures[] log; confirmed wins are promoted into the library. This
+        is what makes the next batch condition on what just happened.
+        """
+        try:
+            memory = AttemptMemoryService(db)
+            recorded = {
+                row[0]
+                for row in db.query(AttemptMemory.result_id)
+                .filter(AttemptMemory.result_id.isnot(None))
+                .all()
+            }
+            query = db.query(Result).order_by(Result.id.desc())
+            if account_ids:
+                query = query.filter(Result.account_id.in_(list(account_ids)))
+            rows = query.limit(300).all()
+            recorded_count = 0
+            for result in rows:
+                if result.id in recorded:
+                    continue
+                if AutoLearningService._is_dry_run(result):
+                    continue
+                try:
+                    focus = AutoLearningService._classify_focus(result.expression or "")
+                except Exception:
+                    focus = None
+                memory.record_result(result, focus=focus, source="live", commit=False)
+                recorded_count += 1
+            if recorded_count:
+                db.commit()
+            return recorded_count
+        except Exception:
+            logger.info("self-improve: absorbing results failed", exc_info=True)
+            db.rollback()
+            return 0
+
+    def _queue_repairs(
+        self,
+        db: Session,
+        orchestrator: SimulationOrchestrator,
+        *,
+        account_ids: Optional[Sequence[int]],
+        pending_room: int,
+    ) -> int:
+        """Queue deterministic failure->fix repairs of recent near-misses (Pattern E)."""
+        if pending_room <= 0:
+            return 0
+        try:
+            memory = AttemptMemoryService(db)
+            near_misses = memory.recent_near_misses(limit=4)
+            if not near_misses:
+                return 0
+            schema = schema_with_persisted_fields(db)
+            refiner = DeterministicRefiner(schema=schema)
+            tried = memory.tried_signatures()
+            queued_total = 0
+            for row in near_misses:
+                if queued_total >= pending_room:
+                    break
+                verdict = Verdict(
+                    is_ok=False,
+                    failures=list(row.failures or []),
+                    score=float(row.score or 0.0),
+                    outcome="near",
+                    metrics={},
+                )
+                base_settings = (
+                    row.settings if isinstance(row.settings, dict) else merge_simulation_settings()
+                )
+                variants = refiner.repair(
+                    row.expression,
+                    verdict,
+                    settings=base_settings,
+                    avoid_signatures=tried,
+                    max_variants=3,
+                )
+                # Revisit count ages a near-miss out of the repair queue eventually.
+                row.attempts = int(row.attempts or 1) + 1
+                for variant in variants:
+                    if queued_total >= pending_room:
+                        break
+                    use_settings = (
+                        variant.settings
+                        if isinstance(variant.settings, dict) and variant.settings
+                        else base_settings
+                    )
+                    result = orchestrator.enqueue_expressions(
+                        db,
+                        [variant.expression],
+                        account_ids=account_ids,
+                        validate=True,
+                        settings=use_settings,
+                        require_worker_enabled=True,
+                    )
+                    if result.ok and result.simulations:
+                        queued_total += len(result.simulations)
+                        tried.add(expression_signature(variant.expression))
+            db.commit()
+            return queued_total
+        except Exception:
+            logger.info("self-improve: queueing repairs failed", exc_info=True)
+            db.rollback()
+            return 0
+
+    def _library_seed_candidates(
+        self,
+        db: Session,
+        schema,
+        focus: str,
+        seed: int,
+        batch_size: int,
+        existing: Sequence[str],
+        candidates: Sequence[AlphaCandidate],
+    ) -> List[AlphaCandidate]:
+        """Mutate confirmed library winners into fresh candidates (Pattern H)."""
+        try:
+            memory = AttemptMemoryService(db)
+            seeds = memory.library_expressions(limit=8, focus=focus)
+            if not seeds:
+                return []
+            refiner = GeneticAlphaRefiner(schema=schema, seed=seed)
+            existing_now = list(existing) + [candidate.expression for candidate in candidates]
+            return refiner.refine(
+                seeds,
+                count=max(batch_size * 2, 8),
+                existing_expressions=existing_now,
+            )
+        except Exception:
+            logger.info("self-improve: library seeding failed", exc_info=True)
+            return []
+
+    def _memory_feedback(self, db: Session) -> tuple[Dict[str, float], List[Dict[str, Any]]]:
+        """Return (failing-shape weights, recent negative examples) from memory."""
+        try:
+            memory = AttemptMemoryService(db)
+            recent = memory.recent_failures(limit=8)
+            return feedback.failure_term_weights(recent), feedback.failure_rows(recent, limit=3)
+        except Exception:
+            return {}, []
+
     def _choose_dataset(self, db: Session) -> DatasetProfile:
         profiles = list_dataset_profiles()
+        # Thompson sampling over dataset arms once live outcomes exist for them.
+        try:
+            stats = AttemptMemoryService(db).arm_stats("dataset")
+            ids = [profile.id for profile in profiles]
+            if bandit.has_signal(ids, stats):
+                chosen_id = bandit.thompson_select(ids, stats, self.random)
+                chosen = next((profile for profile in profiles if profile.id == chosen_id), None)
+                if chosen is not None:
+                    return chosen
+        except Exception:
+            logger.info("self-improve: dataset bandit unavailable", exc_info=True)
         learned = set(self._learned_focuses(db))
         weights = []
         for profile in profiles:
@@ -391,6 +594,17 @@ class SpecialAutopilot:
 
     def _choose_focus(self, db: Session, profile: DatasetProfile) -> str:
         preferred = list(profile.preferred_focuses or ())
+        # Thompson sampling over focus arms (using real PASS/FAIL win-rates) once
+        # any focus has been tried; otherwise fall back to the learned/preferred mix.
+        candidate_focuses = preferred or sorted(STRATEGY_DESCRIPTIONS)
+        try:
+            stats = AttemptMemoryService(db).arm_stats("focus")
+            if bandit.has_signal(candidate_focuses, stats):
+                chosen = bandit.thompson_select(candidate_focuses, stats, self.random)
+                if chosen:
+                    return chosen
+        except Exception:
+            logger.info("self-improve: focus bandit unavailable", exc_info=True)
         learned = self._learned_focuses(db)
         learned_preferred = [item for item in learned if item in preferred]
         if "analyst" in learned_preferred and self.random.random() < 0.55:

@@ -92,16 +92,18 @@ def create_app() -> FastAPI:
                 "/api/orchestration",
                 "/api/ml",
                 "/api/filters",
+                "/api/selfimprove",
             ],
         }
     
     # Import and include routers
-    from .routes import accounts, filters, generation, ml, orchestration
+    from .routes import accounts, filters, generation, ml, orchestration, selfimprove
     app.include_router(accounts.router, prefix="/api/accounts", tags=["accounts"])
     app.include_router(filters.router, prefix="/api/filters", tags=["filters"])
     app.include_router(generation.router, prefix="/api/generation", tags=["generation"])
     app.include_router(ml.router, prefix="/api/ml", tags=["ml"])
     app.include_router(orchestration.router, prefix="/api/orchestration", tags=["orchestration"])
+    app.include_router(selfimprove.router, prefix="/api/selfimprove", tags=["selfimprove"])
     
     # TODO: Add phase 6 dashboard routes
     # from .routes import simulations, results, dashboard

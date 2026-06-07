@@ -37,17 +37,28 @@ class OpenAIAlphaAdvisor:
         focus: Optional[str] = None,
         dataset_id: Optional[str] = None,
         limit: int = 30,
+        recent_failures: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> List[AlphaAdvice]:
         """Return bounded advice for candidates.
 
         Only expressions, candidate metadata, and simulation-setting hints are
         sent. Account credentials and BRAIN session data never belong here.
+
+        ``recent_failures`` (optional) are prior attempts that fell short; they are
+        injected as negative examples so the model steers candidates away from the
+        same failure modes (self-improving loop Pattern C).
         """
         scoped = list(candidates[: max(1, min(limit, 50))])
         if not scoped:
             return []
 
-        prompt = self._prompt(scoped, settings=settings or {}, focus=focus, dataset_id=dataset_id)
+        prompt = self._prompt(
+            scoped,
+            settings=settings or {},
+            focus=focus,
+            dataset_id=dataset_id,
+            recent_failures=recent_failures,
+        )
         text = self.adapter.generate(prompt, temperature=0.1, max_tokens=1800)
         return self._parse_advice(text)
 
@@ -58,6 +69,7 @@ class OpenAIAlphaAdvisor:
         settings: Dict[str, Any],
         focus: Optional[str],
         dataset_id: Optional[str],
+        recent_failures: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> str:
         rows = [
             {
@@ -69,18 +81,41 @@ class OpenAIAlphaAdvisor:
             }
             for candidate in candidates
         ]
+        failure_rows = []
+        for item in (recent_failures or [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            failure_rows.append(
+                {
+                    "expression": str(item.get("expression") or ""),
+                    "sharpe": item.get("sharpe"),
+                    "fitness": item.get("fitness"),
+                    "turnover": item.get("turnover"),
+                    "self_correlation": item.get("self_correlation"),
+                    "issues": list(item.get("failures") or []),
+                }
+            )
         payload = {
             "task": "Score WorldQuant BRAIN FASTEXPR alpha candidates for research triage.",
             "focus": focus,
             "dataset_id": dataset_id,
             "settings": settings,
             "candidates": rows,
+            "prior_failures_to_avoid": failure_rows,
         }
+        failure_hint = (
+            "Some prior attempts already fell short; they are in `prior_failures_to_avoid` "
+            "with their metrics and failed checks. Down-score candidates that repeat those "
+            "shapes or failure modes, and up-score genuinely different angles.\n"
+            if failure_rows
+            else ""
+        )
         return (
             "You are a cautious quantitative research reviewer for WorldQuant BRAIN FASTEXPR.\n"
             "Score each candidate from 0.0 to 1.0 for likely robustness, data-fit, and originality.\n"
             "Penalize obvious overfitting, fragile constants, excessive complexity, weak data/settings fit, "
             "and formulas that look like direct public-copy patterns.\n"
+            f"{failure_hint}"
             "Do not invent BRAIN results. Do not claim a candidate will pass. Return JSON only.\n"
             "JSON schema: {\"advice\":[{\"expression\":\"...\",\"score\":0.0,"
             "\"rationale\":\"short reason\",\"risk_flags\":[\"...\"]}]}.\n\n"

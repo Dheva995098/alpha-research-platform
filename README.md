@@ -567,6 +567,38 @@ The worker defaults to `dry_run: true` when started through the API, so local qu
 - [x] ML scoring and expression filtering tools
 - [x] Worker start/stop/status controls
 
+## Phase 7 Implementation Details — Self-Improving Research Loop
+
+Phase 7 closes the generate → simulate → evaluate → repair loop so the system
+learns across runs instead of generating fresh random candidates every cycle. See
+[`SELF_IMPROVING_LOOP.md`](SELF_IMPROVING_LOOP.md) for the full design.
+
+- [x] `backend/selfimprove/evaluator.py` — objective `evaluate() -> Verdict` with failure diagnosis + continuous score (gates in config)
+- [x] `backend/selfimprove/memory.py` — persistent `attempt_memory` (tried/failures) + auto-growing `alpha_library` (wins)
+- [x] `backend/selfimprove/refiner.py` — deterministic failure→fix repair of near-misses (no LLM/regen call)
+- [x] `backend/selfimprove/feedback.py` — recent failures as negative examples + diversification penalties
+- [x] Autopilot loop closed in `automation/special_runner.py` (absorb results, repair-first, library-seeded + failure-aware generation)
+- [x] Read-only `GET /api/selfimprove/{stats,memory,near-misses,library}` to observe learning
+- [x] `tests/test_phase7_selfimprove.py` (21 tests incl. closed-loop integration)
+
+Effect: near-misses are recovered for free, simulation quota stops chasing
+dead-ends, and confirmed wins compound into future generation — higher local
+good-alpha hit rate per unit of quota. All hooks are inert until real outcomes
+accumulate, so existing behaviour is preserved.
+
+## Phase 8 Implementation Details — BRAIN-Grounded Amplification
+
+Driven by a multi-agent research pass over live BRAIN docs + the "101 Formulaic
+Alphas" paper and a full codebase audit (see [`SELF_IMPROVING_LOOP.md`](SELF_IMPROVING_LOOP.md)):
+
+- [x] Evaluator failure tags aligned to the **real** BRAIN `is.checks` names (split `low_turnover` vs `high_turnover`, own tags for `concentrated_weight`/`units`/`prod_correlation`; `matches_*` treated as eligibility, not failure)
+- [x] Operator whitelist completed with `vector_neut`, `group_vector_neut`, `signed_power`, `hump`, `quantile`, full `vec_*` family, etc.
+- [x] Refiner fixes grounded in BRAIN reality (turnover→`hump`/`trade_when`, correlation→`vector_neut`, concentrated-weight→winsorize+truncation, low-turnover→sharpen, units→rank)
+- [x] `backend/selfimprove/bandit.py` — Thompson-sampling explorer for focus/dataset selection from real win-rates
+- [x] `backend/selfimprove/motifs.py` — proven 101-Alphas/BRAIN motif templates injected as seed candidates
+- [x] ML ranker trains on library winners (positives) + near-miss hard-negatives; data-driven failing-shape penalty in ranking
+- [x] `tests/test_phase7_selfimprove.py` grown to 33 tests; full suite 118 passed / 2 skipped
+
 ## What's Next
 
 - [ ] Add authentication for multi-user deployments
