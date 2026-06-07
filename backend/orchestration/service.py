@@ -15,11 +15,11 @@ from sqlalchemy.orm import Session
 
 from backend.core.brain_api import BRAINAuthenticationError, BRAINRateLimitError, BRAINSession
 from backend.config import settings
-from backend.core.data_fields import BRAINDataFields, get_data_fields
+from backend.core.data_fields import BRAINDataFields, get_data_fields, quarantine_field
 from backend.core.expression_normalizer import clean_brain_error_message, normalize_brain_expression
 from backend.core.simulation_settings import merge_simulation_settings
 from backend.generation.dedup import ExpressionDeduplicator, expression_signature
-from backend.models import Account, AlphaRegistry, Result, Simulation
+from backend.models import Account, AlphaRegistry, InvalidField, Result, Simulation
 from backend.orchestration.quota import (
     AccountQuota,
     quota_for_account,
@@ -1114,6 +1114,17 @@ class SimulationOrchestrator:
         normalized = str(field or "").strip().lower()
         if not normalized:
             return 0
+        # Quarantine the field so generation never produces it again (self-healing),
+        # in-memory for this process and persisted so it survives restarts.
+        quarantine_field(normalized)
+        try:
+            record = db.query(InvalidField).filter(InvalidField.name == normalized).first()
+            if record is None:
+                db.add(InvalidField(name=normalized, reason="brain_unknown_variable", hits=1))
+            else:
+                record.hits = int(record.hits or 1) + 1
+        except Exception:
+            logger.info("Could not persist invalid field %s", normalized, exc_info=True)
         pattern = re.compile(rf"\b{re.escape(normalized)}\b", flags=re.IGNORECASE)
         disabled = 0
         rows = db.query(Simulation).filter(Simulation.status == "pending").all()

@@ -22,10 +22,37 @@ LIVE_INVALID_FIELDS = {
     "scl12_volume",
 }
 
+# Fields the live BRAIN API has rejected at submit time ("unknown variable X").
+# Populated at runtime + persisted (models.InvalidField) so generation self-heals
+# and never wastes another simulation on a field BRAIN does not expose.
+_RUNTIME_INVALID_FIELDS: Set[str] = set()
+
+
+def all_invalid_fields() -> Set[str]:
+    """Static + runtime-learned set of fields to exclude from generation."""
+    return LIVE_INVALID_FIELDS | _RUNTIME_INVALID_FIELDS
+
+
+def quarantine_field(name: Optional[str]) -> bool:
+    """Mark a field as live-invalid so it is excluded from future generation."""
+    normalized = str(name or "").strip().lower()
+    if not normalized or normalized in LIVE_INVALID_FIELDS or normalized in _RUNTIME_INVALID_FIELDS:
+        return False
+    _RUNTIME_INVALID_FIELDS.add(normalized)
+    return True
+
+
+def load_runtime_invalid_fields(names: Optional[object] = None) -> None:
+    """Seed the runtime invalid-field set (called at startup from the DB)."""
+    for name in (names or []):
+        normalized = str(name or "").strip().lower()
+        if normalized:
+            _RUNTIME_INVALID_FIELDS.add(normalized)
+
 
 def is_live_invalid_field(field: str) -> bool:
     """Return true for catalog fields rejected by the live BRAIN API."""
-    return str(field or "").strip().lower() in LIVE_INVALID_FIELDS
+    return str(field or "").strip().lower() in all_invalid_fields()
 
 
 class BRAINDataFields:
@@ -130,7 +157,7 @@ class BRAINDataFields:
             for name, metadata in self.field_metadata.items()
             if not is_live_invalid_field(name)
         }
-        self.fields = (self.CORE_FIELDS | set(self.field_metadata)) - LIVE_INVALID_FIELDS
+        self.fields = (self.CORE_FIELDS | set(self.field_metadata)) - all_invalid_fields()
         if custom_fields:
             self.fields.update(
                 field.strip().lower()

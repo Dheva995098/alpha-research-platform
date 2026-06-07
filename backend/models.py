@@ -251,6 +251,25 @@ class AlphaLibrary(Base):
         return f"<AlphaLibrary(sig={self.expression_signature}, score={self.score})>"
 
 
+class InvalidField(Base):
+    """Fields the live BRAIN API rejected ("unknown variable X").
+
+    Persisted so generation self-heals across restarts: a field BRAIN does not
+    expose is quarantined the first time it is rejected and never generated again.
+    """
+    __tablename__ = "invalid_fields"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    reason = Column(String, nullable=True)
+    hits = Column(Integer, default=1)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    def __repr__(self):
+        return f"<InvalidField(name={self.name}, hits={self.hits})>"
+
+
 # Database setup
 engine = create_engine(
     settings.database_url,
@@ -263,6 +282,18 @@ def init_db():
     """Initialize database tables."""
     Base.metadata.create_all(bind=engine)
     _ensure_lightweight_migrations()
+    _load_invalid_fields()
+
+
+def _load_invalid_fields():
+    """Seed the runtime invalid-field quarantine from persisted rows (self-healing)."""
+    try:
+        from backend.core.data_fields import load_runtime_invalid_fields
+        with SessionLocal() as session:
+            names = [row[0] for row in session.query(InvalidField.name).all()]
+        load_runtime_invalid_fields(names)
+    except Exception:
+        pass
 
 
 def _ensure_lightweight_migrations():

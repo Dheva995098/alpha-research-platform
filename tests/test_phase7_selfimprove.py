@@ -425,6 +425,47 @@ def test_loop_promotes_a_win_and_seeds_generation_from_it():
     assert seeded  # proven winner mutated into fresh candidates
 
 
+def test_invalid_field_quarantine_excludes_from_generation():
+    from backend.core import data_fields as df
+    from backend.core.data_fields import BRAINDataFields, all_invalid_fields, is_live_invalid_field, quarantine_field
+
+    field = "zz_quarantine_test_field"
+    df._RUNTIME_INVALID_FIELDS.discard(field)
+    try:
+        before = BRAINDataFields(custom_fields={field})
+        assert before.validate_field(field)
+        assert quarantine_field(field) is True
+        assert is_live_invalid_field(field)
+        assert field in all_invalid_fields()
+        after = BRAINDataFields(custom_fields={field})
+        assert not after.validate_field(field)  # quarantined -> excluded from generation
+    finally:
+        df._RUNTIME_INVALID_FIELDS.discard(field)
+
+
+def test_brain_unknown_variable_quarantines_and_fails_pending():
+    from backend.core import data_fields as df
+    from backend.models import InvalidField
+    from backend.orchestration.service import SimulationOrchestrator
+
+    field = "zz_unknown_var_field"
+    df._RUNTIME_INVALID_FIELDS.discard(field)
+    db = make_db()
+    try:
+        sim = Simulation(expression=f"rank(ts_backfill({field}, 120))", status="pending")
+        db.add(sim)
+        db.commit()
+        disabled = SimulationOrchestrator._fail_pending_with_field(db, field)
+        db.commit()
+        assert disabled == 1
+        db.refresh(sim)
+        assert sim.status == "failed"
+        assert db.query(InvalidField).filter(InvalidField.name == field).count() == 1
+        assert df.is_live_invalid_field(field)  # now quarantined for future generation
+    finally:
+        df._RUNTIME_INVALID_FIELDS.discard(field)
+
+
 def test_bandit_thompson_prefers_higher_winrate_arm():
     rng = _random.Random(0)
     stats = {"momentum": (40, 50), "sentiment": (1, 50)}

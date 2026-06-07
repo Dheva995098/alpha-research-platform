@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from sqlalchemy.orm import Session
 
-from backend.core.data_fields import BRAINDataFields, LIVE_INVALID_FIELDS, is_live_invalid_field
+from backend.core.data_fields import BRAINDataFields, all_invalid_fields, is_live_invalid_field
 from backend.core.dataset_catalog import (
     DATASET_PROFILES,
     datasets_for_fields,
@@ -125,8 +125,9 @@ def top_field_records(
     """Return highest-scoring fields with optional filters."""
     ensure_catalog_field_records(db)
     query = db.query(DataFieldRecord)
-    if LIVE_INVALID_FIELDS:
-        query = query.filter(~DataFieldRecord.name.in_(LIVE_INVALID_FIELDS))
+    invalid = all_invalid_fields()
+    if invalid:
+        query = query.filter(~DataFieldRecord.name.in_(invalid))
     normalized_datasets = normalize_dataset_ids(dataset_ids)
     if normalized_datasets:
         query = query.filter(DataFieldRecord.dataset_id.in_(normalized_datasets))
