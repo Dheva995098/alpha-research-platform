@@ -149,6 +149,7 @@ function App() {
   const [queue, setQueue] = useState([]);
   const [results, setResults] = useState([]);
   const [goodVault, setGoodVault] = useState({ summary: {}, alphas: [] });
+  const [selfImprove, setSelfImprove] = useState({ stats: null, memory: [], nearMisses: [], library: [] });
   const [queueStatusFilter, setQueueStatusFilter] = useState("all");
   const [resultSourceFilter, setResultSourceFilter] = useState("all");
   const [predictions, setPredictions] = useState([]);
@@ -199,6 +200,12 @@ function App() {
     refreshFieldIntel(form.dataset_id);
   }, [form.dataset_id]);
 
+  useEffect(() => {
+    if (activeTab === "selfimprove") {
+      refreshSelfImprove();
+    }
+  }, [activeTab]);
+
   async function request(path, options = {}) {
     const response = await fetch(`${API_BASE}${path}`, {
       headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -244,6 +251,23 @@ function App() {
     setWorker(workerData);
     setLearning(learningData);
     setGoodVault(goodData || { summary: {}, alphas: [] });
+  }
+
+  async function refreshSelfImprove() {
+    await run("selfimprove", async () => {
+      const [stats, memory, nearMisses, library] = await Promise.all([
+        request("/api/selfimprove/stats"),
+        request("/api/selfimprove/memory?limit=50"),
+        request("/api/selfimprove/near-misses?limit=25"),
+        request("/api/selfimprove/library?limit=50"),
+      ]);
+      setSelfImprove({
+        stats: stats || null,
+        memory: memory?.attempts || [],
+        nearMisses: nearMisses?.near_misses || [],
+        library: library?.library || [],
+      });
+    });
   }
 
   async function refreshAll() {
@@ -726,6 +750,7 @@ function App() {
         <Tab id="decisions" active={activeTab} setActive={setActiveTab} icon={<Filter />} label="Decisions" />
         <Tab id="rank" active={activeTab} setActive={setActiveTab} icon={<Brain />} label="Rank" />
         <Tab id="learner" active={activeTab} setActive={setActiveTab} icon={<Brain />} label="Learner" />
+        <Tab id="selfimprove" active={activeTab} setActive={setActiveTab} icon={<RefreshCcw />} label="Learning" />
         <Tab id="worker" active={activeTab} setActive={setActiveTab} icon={<Activity />} label="Worker" />
       </nav>
 
@@ -1060,6 +1085,88 @@ function App() {
           <div className="panel list-panel">
             <PanelTitle icon={<CheckCircle2 />} title="Learned Patterns" />
             <LearnerRecommendations learning={learning} />
+          </div>
+        </section>
+      )}
+
+      {activeTab === "selfimprove" && (
+        <section className="workspace two-column">
+          <div className="panel">
+            <PanelTitle icon={<RefreshCcw />} title="Self-Improving Loop" />
+            <div className="worker-state">
+              <StatusPill label="Attempts" ok value={selfImprove.stats?.attempts ?? 0} />
+              <StatusPill label="Wins" ok={Boolean(selfImprove.stats?.wins)} value={selfImprove.stats?.wins ?? 0} />
+              <StatusPill label="Near" ok value={selfImprove.stats?.near_misses ?? 0} />
+              <StatusPill label="Fails" ok value={selfImprove.stats?.failures ?? 0} />
+              <StatusPill label="Win rate" ok value={formatPercent(selfImprove.stats?.win_rate)} />
+              <StatusPill label="Library" ok={Boolean(selfImprove.stats?.library_size)} value={selfImprove.stats?.library_size ?? 0} />
+            </div>
+            <div className="button-row">
+              <ActionButton icon={<RefreshCcw />} label="Refresh" busy={busy === "selfimprove"} onClick={refreshSelfImprove} />
+            </div>
+            <PanelTitle icon={<Sparkles />} title="Near-misses queued for repair" />
+            {selfImprove.nearMisses.length === 0 ? (
+              <div className="empty">No repairable near-misses yet. They appear once live results land.</div>
+            ) : (
+              <div className="item-list">
+                {selfImprove.nearMisses.map((row) => (
+                  <div className="vault-row" key={`nm-${row.id}`}>
+                    <div className="vault-row-main">
+                      <div className="row-meta">
+                        <span>sh {formatMetric(row.sharpe)}</span>
+                        <span>fit {formatMetric(row.fitness)}</span>
+                        <span>turn {formatMetric(row.turnover)}</span>
+                        {(row.failures || []).map((tag) => (
+                          <span key={tag}>{tag}</span>
+                        ))}
+                      </div>
+                      <code>{row.expression}</code>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="panel list-panel">
+            <PanelTitle icon={<Vault />} title="Win library (auto-grows)" />
+            {selfImprove.library.length === 0 ? (
+              <div className="empty">No confirmed wins yet.</div>
+            ) : (
+              <div className="item-list">
+                {selfImprove.library.map((row) => (
+                  <div className="vault-row" key={`lib-${row.id}`}>
+                    <div className="vault-row-main">
+                      <div className="row-meta">
+                        <span>score {formatMetric(row.score)}</span>
+                        <span>sh {formatMetric(row.sharpe)}</span>
+                        <span>fit {formatMetric(row.fitness)}</span>
+                        {row.focus && <span>{row.focus}</span>}
+                      </div>
+                      <code>{row.expression}</code>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <PanelTitle icon={<Brain />} title="Recent attempts" />
+            {selfImprove.memory.length === 0 ? (
+              <div className="empty">No attempts recorded yet.</div>
+            ) : (
+              <div className="item-list">
+                {selfImprove.memory.slice(0, 20).map((row) => (
+                  <div className="vault-row" key={`mem-${row.id}`}>
+                    <div className="vault-row-main">
+                      <div className="row-meta">
+                        <span>{row.outcome}</span>
+                        <span>score {formatMetric(row.score)}</span>
+                        {row.focus && <span>{row.focus}</span>}
+                      </div>
+                      <code>{row.expression}</code>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </section>
       )}
